@@ -73,10 +73,26 @@ check_compatibility() {
     
     # Check if any USB ports support power control
     POWER_CONTROL_FILES=$(find /sys/bus/usb/devices -name "power/control" 2>/dev/null | wc -l)
+    
+    # If standard power control files aren't found, check alternative locations
     if [ "$POWER_CONTROL_FILES" -eq 0 ]; then
-        echo "WARNING: No USB power control interfaces found."
-        echo "GrubPower may not be able to manage power on this system."
-        ask_continue
+        # Check for alternative power management interfaces
+        ALT_POWER_FILES=$(find /sys/bus/usb/devices -path "*/power/*" 2>/dev/null | wc -l)
+        
+        if [ "$ALT_POWER_FILES" -gt 0 ]; then
+            echo "Found alternative USB power management interfaces."
+            echo "GrubPower may still work but with limited functionality."
+            ask_continue
+        else
+            echo "WARNING: No USB power control interfaces found."
+            echo "GrubPower may not be able to manage power on this system."
+            echo "This could be due to kernel configuration or hardware limitations."
+            echo "You can try one of the following:"
+            echo "1. Check if USB modules are loaded: lsmod | grep usb"
+            echo "2. Try installing additional USB modules: modprobe usbcore"
+            echo "3. Proceed anyway and test if it works on your hardware"
+            ask_continue
+        fi
     fi
     
     # Check for battery
