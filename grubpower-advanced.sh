@@ -87,11 +87,58 @@ check_compatibility() {
             echo "WARNING: No USB power control interfaces found."
             echo "GrubPower may not be able to manage power on this system."
             echo "This could be due to kernel configuration or hardware limitations."
-            echo "You can try one of the following:"
-            echo "1. Check if USB modules are loaded: lsmod | grep usb"
-            echo "2. Try installing additional USB modules: modprobe usbcore"
-            echo "3. Proceed anyway and test if it works on your hardware"
-            ask_continue
+            
+            # Check if USB modules are loaded
+            echo "Checking for loaded USB modules..."
+            USB_MODULES_LOADED=$(lsmod | grep -E "usb|ehci|ohci|uhci|xhci" | wc -l)
+            
+            if [ "$USB_MODULES_LOADED" -eq 0 ]; then
+                echo "No USB modules appear to be loaded."
+                echo "Would you like to try loading essential USB modules?"
+                read -p "Load USB modules? (y/n): " LOAD_MODULES
+                
+                if [[ "$LOAD_MODULES" =~ ^[Yy]$ ]]; then
+                    echo "Attempting to load USB modules..."
+                    modprobe usbcore 2>/dev/null && echo "Loaded: usbcore" || echo "Failed to load: usbcore"
+                    modprobe usb_common 2>/dev/null && echo "Loaded: usb_common" || echo "Failed to load: usb_common"
+                    modprobe ehci_hcd 2>/dev/null && echo "Loaded: ehci_hcd" || echo "Failed to load: ehci_hcd"
+                    modprobe ohci_hcd 2>/dev/null && echo "Loaded: ohci_hcd" || echo "Failed to load: ohci_hcd"
+                    modprobe uhci_hcd 2>/dev/null && echo "Loaded: uhci_hcd" || echo "Failed to load: uhci_hcd"
+                    modprobe xhci_hcd 2>/dev/null && echo "Loaded: xhci_hcd" || echo "Failed to load: xhci_hcd"
+                    
+                    # Check again after loading modules
+                    echo "Checking USB compatibility again after loading modules..."
+                    sleep 2
+                    NEW_POWER_CONTROL_FILES=$(find /sys/bus/usb/devices -name "power/control" 2>/dev/null | wc -l)
+                    
+                    if [ "$NEW_POWER_CONTROL_FILES" -gt 0 ]; then
+                        echo "SUCCESS: USB power control interfaces are now available."
+                        echo "Found $NEW_POWER_CONTROL_FILES power control interfaces."
+                        POWER_CONTROL_FILES=$NEW_POWER_CONTROL_FILES
+                    else
+                        echo "WARNING: Still no USB power control interfaces found."
+                        echo "You can try one of the following:"
+                        echo "1. Check if USB modules are loaded: lsmod | grep usb"
+                        echo "2. Try installing additional USB modules: modprobe usbcore"
+                        echo "3. Proceed anyway and test if it works on your hardware"
+                        ask_continue
+                    fi
+                else
+                    echo "Skipping module loading."
+                    echo "You can try one of the following:"
+                    echo "1. Check if USB modules are loaded: lsmod | grep usb"
+                    echo "2. Try installing additional USB modules: modprobe usbcore"
+                    echo "3. Proceed anyway and test if it works on your hardware"
+                    ask_continue
+                fi
+            else
+                echo "USB modules are loaded, but power control interfaces are still not found."
+                echo "You can try one of the following:"
+                echo "1. Check if USB modules are loaded: lsmod | grep usb"
+                echo "2. Try installing additional USB modules: modprobe usbcore"
+                echo "3. Proceed anyway and test if it works on your hardware"
+                ask_continue
+            fi
         fi
     fi
     
@@ -640,10 +687,15 @@ list_usb_devices() {
                 if [ -f "$dev/power/control" ]; then
                     power=$(cat "$dev/power/control")
                     echo "  - Power: $power"
+                    echo "  - Note: All USB devices can benefit from power management, not just power-only devices"
                 fi
             fi
         done
     fi
+    echo "--------------------------------"
+    echo "NOTE: USB power management works for all types of USB devices, not just those"
+    echo "      marked as 'power-only' devices. Any connected USB device can benefit"
+    echo "      from the power settings configured by GrubPower."
     echo "--------------------------------"
 }
 
