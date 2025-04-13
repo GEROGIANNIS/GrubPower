@@ -101,7 +101,7 @@ check_compatibility() {
                     echo "Attempting to load USB modules..."
                     modprobe usbcore 2>/dev/null && echo "Loaded: usbcore" || echo "Failed to load: usbcore"
                     modprobe usb_common 2>/dev/null && echo "Loaded: usb_common" || echo "Failed to load: usb_common"
-                    modprobe ehci_hcd 2>/devnull && echo "Loaded: ehci_hcd" || echo "Failed to load: ehci_hcd"
+                    modprobe ehci_hcd 2>/dev/null && echo "Loaded: ehci_hcd" || echo "Failed to load: ehci_hcd"
                     modprobe ohci_hcd 2>/dev/null && echo "Loaded: ohci_hcd" || echo "Failed to load: ohci_hcd"
                     modprobe uhci_hcd 2>/dev/null && echo "Loaded: uhci_hcd" || echo "Failed to load: uhci_hcd"
                     modprobe xhci_hcd 2>/dev/null && echo "Loaded: xhci_hcd" || echo "Failed to load: xhci_hcd"
@@ -419,6 +419,227 @@ detect_system() {
     fi
 }
 
+# Get kernel information and update configuration
+detect_kernel() {
+    echo "Detecting kernel information..."
+    
+    # Try various methods to find the running kernel
+    RUNNING_KERNEL=$(uname -r)
+    echo "Current running kernel: $RUNNING_KERNEL"
+    
+    # Method 1: First check the running kernel
+    if [ -f "/boot/vmlinuz-$RUNNING_KERNEL" ]; then
+        DETECTED_KERNEL="/boot/vmlinuz-$RUNNING_KERNEL"
+        echo "Found kernel at: $DETECTED_KERNEL (running kernel)"
+    # Method 2: Check common naming patterns for the running kernel
+    elif [ -f "/boot/vmlinuz" ]; then
+        DETECTED_KERNEL="/boot/vmlinuz"
+        echo "Found kernel at: $DETECTED_KERNEL (default symlink)"
+    # Method 3: Look for the latest available kernel
+    else
+        echo "Searching for available kernels..."
+        DETECTED_KERNEL=$(find /boot -name "vmlinuz*" -type f | sort -V | tail -n 1)
+        
+        if [ -n "$DETECTED_KERNEL" ]; then
+            echo "Found latest kernel at: $DETECTED_KERNEL"
+        else
+            echo "ERROR: No kernels found in /boot directory."
+            echo "Please manually specify the kernel path."
+            return 1
+        fi
+    fi
+    
+    # Verify the detected kernel
+    if [ ! -f "$DETECTED_KERNEL" ]; then
+        echo "ERROR: Detected kernel file doesn't exist: $DETECTED_KERNEL"
+        return 1
+    fi
+    
+    # Update kernel path in configuration
+    echo "Updating configuration with kernel path: $DETECTED_KERNEL"
+    if [ -f "$CONFIG_FILE" ]; then
+        sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$DETECTED_KERNEL\"|" "$CONFIG_FILE"
+    fi
+    
+    KERNEL_PATH="$DETECTED_KERNEL"
+    return 0
+}
+
+# Prompt user to select a kernel
+select_kernel() {
+    echo "Searching for available kernels..."
+    AVAILABLE_KERNELS=($(find /boot -name "vmlinuz-*" | sort -V))
+    
+    if [ ${#AVAILABLE_KERNELS[@]} -eq 0 ]; then
+        echo "ERROR: No kernels found in /boot directory."
+        echo "Please manually specify the kernel path in $CONFIG_FILE"
+        exit 1
+    fi
+    
+    echo "Found ${#AVAILABLE_KERNELS[@]} kernels:"
+    for i in "${!AVAILABLE_KERNELS[@]}"; do
+        KERNEL_VERSION=$(basename "${AVAILABLE_KERNELS[$i]}" | sed 's/vmlinuz-//')
+        echo "  $((i+1)). $KERNEL_VERSION (${AVAILABLE_KERNELS[$i]})"
+    done
+    
+    echo ""
+    read -p "Select a kernel [1-${#AVAILABLE_KERNELS[@]}] (default: ${#AVAILABLE_KERNELS[@]}): " KERNEL_CHOICE
+    
+    # Default to the latest kernel if no selection is made
+    if [ -z "$KERNEL_CHOICE" ]; then
+        KERNEL_CHOICE=${#AVAILABLE_KERNELS[@]}
+    fi
+    
+    # Validate input
+    if ! [[ "$KERNEL_CHOICE" =~ ^[0-9]+$ ]] || [ "$KERNEL_CHOICE" -lt 1 ] || [ "$KERNEL_CHOICE" -gt ${#AVAILABLE_KERNELS[@]} ]; then
+        echo "Invalid selection. Using the latest kernel."
+        KERNEL_CHOICE=${#AVAILABLE_KERNELS[@]}
+    fi
+    
+    # Set the selected kernel
+    SELECTED_KERNEL="${AVAILABLE_KERNELS[$((KERNEL_CHOICE-1))]}"
+    echo "Selected kernel: $SELECTED_KERNEL"
+    
+    # Update kernel path in config
+    sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$SELECTED_KERNEL\"|" "$CONFIG_FILE"
+    KERNEL_PATH="$SELECTED_KERNEL"
+}
+
+# Debug and enhanced kernel path detection function
+debug_kernel_path() {
+    echo "======= KERNEL PATH DEBUGGING ======="
+    echo "Current kernel path setting: $KERNEL_PATH"
+    
+    # Check if the kernel file exists
+    if [ -f "$KERNEL_PATH" ]; then
+        echo "GOOD: Kernel file exists at specified path"
+        ls -la "$KERNEL_PATH"
+    else
+        echo "ERROR: Kernel file does not exist at specified path!"
+        
+        # First check if there was a typo in the path
+        POSSIBLE_TYPO_FIXES=$(find /boot -name "*$(basename "$KERNEL_PATH")*" 2>/dev/null)
+        if [ -n "$POSSIBLE_TYPO_FIXES" ]; then
+            echo "Possible matches found:"
+            echo "$POSSIBLE_TYPO_FIXES"
+        fi
+        
+        # Check for running kernel
+        RUNNING_KERNEL=$(uname -r)
+        echo "Running kernel version: $RUNNING_KERNEL"
+        
+        # Look for all kernel files in /boot
+        echo "Available kernels in /boot directory:"
+        ls -la /boot/vmlinuz* 2>/dev/null || echo "  No vmlinuz files found in /boot"
+        
+        # Check for genenic/generic typo which is common
+        if [[ "$KERNEL_PATH" == *"genenic"* ]]; then
+            FIXED_PATH="${KERNEL_PATH//genenic/generic}"
+            echo "Detected possible 'genenic' typo. Checking for: $FIXED_PATH"
+            if [ -f "$FIXED_PATH" ]; then
+                echo "FOUND CORRECTED PATH: $FIXED_PATH"
+                echo "Will use this corrected path instead"
+                KERNEL_PATH="$FIXED_PATH"
+                if [ -f "$CONFIG_FILE" ]; then
+                    sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+                    echo "Updated configuration file with corrected kernel path"
+                fi
+            fi
+        fi
+    fi
+    
+    # Check GRUB root partition
+    echo "Current GRUB root setting: $GRUB_ROOT"
+    
+    # Try to detect if there's an issue with GRUB root
+    BOOT_PARTITION=$(df -h /boot | tail -n 1 | awk '{print $1}')
+    if [ -n "$BOOT_PARTITION" ]; then
+        echo "Boot partition: $BOOT_PARTITION"
+        
+        # Try to determine correct GRUB root from current boot partition
+        if [[ "$BOOT_PARTITION" =~ /dev/sd([a-z])([0-9]+) ]]; then
+            DISK_LETTER=${BASH_REMATCH[1]}
+            PART_NUM=${BASH_REMATCH[2]}
+            DETECTED_ROOT="hd0,$((PART_NUM-1))"
+            
+            echo "Detected GRUB root: $DETECTED_ROOT"
+            if [ "$DETECTED_ROOT" != "$GRUB_ROOT" ]; then
+                echo "WARNING: Current GRUB root ($GRUB_ROOT) may not match detected value ($DETECTED_ROOT)"
+                echo "This could cause kernel loading issues"
+                
+                # Offer to update the GRUB_ROOT value
+                echo "Would you like to update GRUB_ROOT to the detected value?"
+                read -p "Update GRUB_ROOT to $DETECTED_ROOT? (y/n): " UPDATE_GRUB_ROOT
+                
+                if [[ "$UPDATE_GRUB_ROOT" =~ ^[Yy]$ ]]; then
+                    GRUB_ROOT="$DETECTED_ROOT"
+                    if [ -f "$CONFIG_FILE" ]; then
+                        sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
+                        echo "Updated configuration file with detected GRUB root"
+                    fi
+                fi
+            else
+                echo "GOOD: GRUB root appears to be correctly set"
+            fi
+        else
+            echo "WARNING: Could not parse boot partition format. Manual check recommended."
+        fi
+    else
+        echo "WARNING: Could not detect boot partition. Manual check recommended."
+    fi
+    
+    # Display GRUB configuration information
+    echo "GRUB custom configuration file: $GRUB_CUSTOM"
+    if [ -f "$GRUB_CUSTOM" ]; then
+        echo "GOOD: GRUB custom configuration file exists"
+    else
+        echo "ERROR: GRUB custom configuration file does not exist!"
+    fi
+    
+    # Run grub-probe to check for drive detection issues
+    if command -v grub-probe &> /dev/null; then
+        echo "Running grub-probe to verify GRUB device mapping..."
+        GRUB_PROBE_BOOT=$(grub-probe -t drive /boot 2>/dev/null || echo "Error")
+        if [ "$GRUB_PROBE_BOOT" = "Error" ]; then
+            echo "WARNING: Could not determine GRUB boot device with grub-probe"
+        else
+            echo "GRUB sees /boot as: $GRUB_PROBE_BOOT"
+            
+            # Extract just the drive number and partition using sed instead of problematic regex
+            DETECTED_GRUB=$(echo "$GRUB_PROBE_BOOT" | sed -n 's/.*(\([^)]*\)).*/\1/p')
+            if [ -n "$DETECTED_GRUB" ]; then
+                echo "Parsed GRUB format: $DETECTED_GRUB"
+                
+                if [ "$DETECTED_GRUB" != "$GRUB_ROOT" ]; then
+                    echo "WARNING: Current GRUB root ($GRUB_ROOT) does not match grub-probe value ($DETECTED_GRUB)"
+                    echo "This is likely causing the kernel loading failure"
+                    
+                    # Offer to update the GRUB_ROOT value
+                    echo "Would you like to update GRUB_ROOT to the grub-probe value?"
+                    read -p "Update GRUB_ROOT to $DETECTED_GRUB? (y/n): " UPDATE_GRUB_ROOT2
+                    
+                    if [[ "$UPDATE_GRUB_ROOT2" =~ ^[Yy]$ ]]; then
+                        GRUB_ROOT="$DETECTED_GRUB"
+                        if [ -f "$CONFIG_FILE" ]; then
+                            sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
+                            echo "Updated configuration file with grub-probe GRUB root"
+                        fi
+                    fi
+                else
+                    echo "GOOD: GRUB root matches grub-probe value"
+                fi
+            else
+                echo "WARNING: Could not parse GRUB root format from probe output"
+            fi
+        fi
+    else
+        echo "grub-probe command not available, skipping GRUB device mapping check"
+    fi
+    
+    echo "======= END KERNEL PATH DEBUGGING ======="
+    echo ""
+}
+
 # Create the init script with advanced features
 create_init_script() {
     echo "Creating advanced init script..."
@@ -426,7 +647,10 @@ create_init_script() {
 #!/bin/sh
 # GrubPower Advanced init script
 
-# Mount essential filesystems
+echo "GrubPower Advanced initializing..."
+
+# Mount essential filesystems first
+echo "Mounting essential filesystems..."
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev
@@ -439,15 +663,50 @@ if [ $ENABLE_LOGGING -eq 1 ]; then
     echo "GrubPower logging started at \$(date)"
 fi
 
-# Load USB modules
-echo "Loading USB modules..."
-modprobe usb_common
+# Ensure Linux kernel is fully loaded and initialized
+echo "Initializing kernel subsystems..."
+
+# Wait for kernel to finish setting up critical subsystems
+sleep 2
+
+# Load essential kernel modules first
+echo "Loading essential kernel modules..."
+modprobe unix
+modprobe dm-mod || true
+modprobe ext4 || true
+
+# Load additional hardware modules
+modprobe acpi
+modprobe thermal || true
+modprobe processor || true
+modprobe fan || true
+modprobe battery || true
+modprobe ac || true
+modprobe button || true
+
+# Load USB subsystem modules in the correct order
+echo "Loading USB core modules..."
 modprobe usbcore
-modprobe ehci_hcd || true
-modprobe ohci_hcd || true
+modprobe usb_common
+modprobe hid
+modprobe hid_generic || true
+
+echo "Loading USB host controller modules..."
+# Load HCI modules in order from oldest to newest
 modprobe uhci_hcd || true
+modprobe ohci_hcd || true
+modprobe ehci_hcd || true
 modprobe xhci_hcd || true
+
+# Wait for USB subsystem to initialize
+echo "Waiting for USB subsystem to initialize..."
+sleep 3
+
+# Load storage modules
+echo "Loading storage modules..."
 modprobe usb_storage || true
+modprobe scsi_mod || true
+modprobe sd_mod || true
 
 # Load extra modules if specified
 if [ -n "$EXTRA_MODULES" ]; then
@@ -457,13 +716,37 @@ if [ -n "$EXTRA_MODULES" ]; then
     done
 fi
 
+# Verify USB subsystem is ready
+echo "Verifying USB subsystem..."
+if [ ! -d "/sys/bus/usb/devices" ]; then
+    echo "WARNING: USB subsystem not detected. Attempting to initialize again..."
+    rmmod uhci_hcd ohci_hcd ehci_hcd xhci_hcd 2>/dev/null || true
+    sleep 1
+    modprobe uhci_hcd || true
+    modprobe ohci_hcd || true
+    modprobe ehci_hcd || true
+    modprobe xhci_hcd || true
+    sleep 2
+fi
+
 # Configure USB power management based on port selection
 echo "Configuring USB power management..."
 case "$SELECT_PORTS" in
     all)
         echo "Enabling power for all USB ports"
+        # First try the new power control path
         for i in /sys/bus/usb/devices/*/power/control; do
-            echo "on" > \$i 2>/dev/null || true
+            if [ -f "\$i" ]; then
+                echo "on" > \$i 2>/dev/null || true
+                echo "Set power control for \$i"
+            fi
+        done
+        # Then try any alternative power management interfaces
+        for i in /sys/bus/usb/devices/*/power/level; do
+            if [ -f "\$i" ]; then
+                echo "on" > \$i 2>/dev/null || true
+                echo "Set power level for \$i"
+            fi
         done
         ;;
     charging)
@@ -493,11 +776,34 @@ esac
 if [ $DISABLE_AUTOSUSPEND -eq 1 ]; then
     echo "Disabling USB autosuspend..."
     for i in /sys/bus/usb/devices/*/power/autosuspend; do
-        echo "-1" > \$i 2>/dev/null || true
+        if [ -f "\$i" ]; then
+            echo "-1" > \$i 2>/dev/null || true
+            echo "Disabled autosuspend for \$i"
+        fi
     done
     for i in /sys/bus/usb/devices/*/power/autosuspend_delay_ms; do
-        echo "-1" > \$i 2>/dev/null || true
+        if [ -f "\$i" ]; then
+            echo "-1" > \$i 2>/dev/null || true
+            echo "Disabled autosuspend delay for \$i"
+        fi
     done
+    
+    # Force USB devices to be active
+    for i in /sys/bus/usb/devices/*/power/wakeup; do
+        if [ -f "\$i" ]; then
+            echo "enabled" > \$i 2>/dev/null || true
+        fi
+    done
+    
+    # Additional runtime power management controls
+    for i in /sys/bus/usb/devices/*/power/runtime_enabled; do
+        if [ -f "\$i" ]; then
+            echo "on" > \$i 2>/dev/null || true
+        fi
+    done
+    
+    # Set USB controller power policy
+    echo 'auto' > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true
 fi
 
 # Function to get battery level (works on most Linux systems)
@@ -542,9 +848,9 @@ is_lid_closed() {
             if [ -f "$device/device/name" ]; then
                 if grep -q -i "lid" "$device/device/name"; then
                     # Found lid device, now check state
-                    device_name=$(basename $device)
-                    state=$(cat /sys/class/input/$device_name/device/sw)
-                    if [ "$state" = "1" ]; then
+                    device_name=$(basename "$device")
+                    state=$(cat "/sys/class/input/\$device_name/device/sw")
+                    if [ "\$state" = "1" ]; then
                         return 0  # Lid is closed
                     else
                         return 1  # Lid is open
@@ -649,6 +955,49 @@ if [ $HANDLE_ACPI -eq 1 ]; then
     fi
 fi
 
+# Call device detection
+list_usb_devices() {
+    echo "Checking connected USB devices..."
+    echo "--------------------------------"
+    
+    # Create a symlink to lsusb if available
+    if command -v lsusb >/dev/null 2>&1; then
+        ln -sf $(which lsusb) /bin/lsusb
+        lsusb
+    else
+        # Simple alternative using /sys filesystem
+        for dev in /sys/bus/usb/devices/[0-9]*; do
+            if [ -d "$dev" ]; then
+                devname=$(basename "$dev")
+                
+                # Try to get vendor and product info
+                if [ -f "$dev/manufacturer" ] && [ -f "$dev/product" ]; then
+                    vendor=$(cat "$dev/manufacturer" 2>/dev/null || echo "Unknown")
+                    product=$(cat "$dev/product" 2>/dev/null || echo "Unknown")
+                    echo "USB Device $devname: $vendor $product"
+                else
+                    echo "USB Device $devname"
+                fi
+                
+                # Check power status
+                if [ -f "$dev/power/control" ]; then
+                    power=$(cat "$dev/power/control")
+                    echo "  - Power: $power"
+                    echo "  - Note: All USB devices can benefit from power management, not just power-only devices"
+                fi
+            fi
+        done
+    fi
+    echo "--------------------------------"
+    echo "NOTE: USB power management works for all types of USB devices, not just those"
+    echo "      marked as 'power-only' devices. Any connected USB device can benefit"
+    echo "      from the power settings configured by GrubPower."
+    echo "--------------------------------"
+}
+
+# Call device detection after USB configuration
+list_usb_devices
+
 # Monitor battery, lid state, and keep system alive
 echo "Starting power and lid monitoring loop..."
 while true; do
@@ -701,70 +1050,33 @@ while true; do
         fi
     fi
     
-    # Sleep for a few seconds before checking again
-    # Using shorter sleep for more responsive lid detection
-    sleep 5
-done
-
-# Create USB device detection function
-    cat >> "$BUILD_DIR/init" <<'EOF'
-
-# Function to list connected USB devices
-list_usb_devices() {
-    echo "Checking connected USB devices..."
-    echo "--------------------------------"
-    
-    # Create a symlink to lsusb if available
-    if command -v lsusb >/dev/null 2>&1; then
-        ln -sf $(which lsusb) /bin/lsusb
-        lsusb
-    else
-        # Simple alternative using /sys filesystem
-        for dev in /sys/bus/usb/devices/[0-9]*; do
-            if [ -d "$dev" ]; then
-                devname=$(basename "$dev")
-                
-                # Try to get vendor and product info
-                if [ -f "$dev/manufacturer" ] && [ -f "$dev/product" ]; then
-                    vendor=$(cat "$dev/manufacturer" 2>/dev/null || echo "Unknown")
-                    product=$(cat "$dev/product" 2>/dev/null || echo "Unknown")
-                    echo "USB Device $devname: $vendor $product"
-                else
-                    echo "USB Device $devname"
-                fi
-                
-                # Check power status
-                if [ -f "$dev/power/control" ]; then
-                    power=$(cat "$dev/power/control")
-                    echo "  - Power: $power"
-                    echo "  - Note: All USB devices can benefit from power management, not just power-only devices"
+    # Periodically check and refresh USB power settings
+    if [ \$((\$(date +%s) % 60)) -eq 0 ]; then
+        # Refresh USB power settings to ensure they remain active
+        for i in /sys/bus/usb/devices/*/power/control; do
+            if [ -f "\$i" ]; then
+                current=\$(cat "\$i" 2>/dev/null)
+                if [ "\$current" != "on" ]; then
+                    echo "on" > \$i 2>/dev/null || true
+                    echo "Refreshed power control for \$i"
                 fi
             fi
         done
     fi
-    echo "--------------------------------"
-    echo "NOTE: USB power management works for all types of USB devices, not just those"
-    echo "      marked as 'power-only' devices. Any connected USB device can benefit"
-    echo "      from the power settings configured by GrubPower."
-    echo "--------------------------------"
-}
-
-# Call device detection after USB configuration
-list_usb_devices
-
-# Set up periodic USB device checking (every 5 minutes)
-USB_CHECK_INTERVAL=300  # seconds
-last_usb_check=$(date +%s)
-
+    
+    # Sleep for a few seconds before checking again
+    # Using shorter sleep for more responsive lid detection
+    sleep 5
+done
 EOF
 }
 
-# Build the initramfs
+# Build the initramfs with necessary utilities and modules
 build_initramfs() {
     echo "Building advanced initramfs image..."
     
     # Create directory structure
-    mkdir -p "$BUILD_DIR"/{bin,dev,proc,sys,usr/lib/modules,var/log,etc/acpi/events}
+    mkdir -p "$BUILD_DIR"/{bin,dev,proc,sys,usr/lib/modules,var/log,etc/acpi/events,lib/modules}
     
     # Install busybox
     if command -v busybox &> /dev/null; then
@@ -781,16 +1093,54 @@ build_initramfs() {
     fi
     
     # Install additional tools if available
-    for tool in vbetool setterm acpid; do
+    for tool in vbetool setterm acpid lsusb; do
         if command -v $tool &> /dev/null; then
             cp $(which $tool) "$BUILD_DIR/bin/"
             echo "Added $tool to initramfs"
+            
+            # Also copy required libraries
+            LIBS=$(ldd $(which $tool) 2>/dev/null | grep -o '/lib[^[:space:]]*' | sort -u)
+            for lib in $LIBS; do
+                if [ -f "$lib" ]; then
+                    dir=$(dirname "$lib")
+                    mkdir -p "$BUILD_DIR$dir"
+                    cp -L "$lib" "$BUILD_DIR$dir/"
+                fi
+            done
         fi
     done
     
+    # Copy kernel modules that might be needed for USB
+    echo "Copying essential kernel modules..."
+    RUNNING_KERNEL=$(uname -r)
+    MODULE_DIR="/lib/modules/$RUNNING_KERNEL"
+    
+    if [ -d "$MODULE_DIR" ]; then
+        # Create module directory in initramfs
+        mkdir -p "$BUILD_DIR$MODULE_DIR"
+        
+        # Copy module dependencies file
+        if [ -f "$MODULE_DIR/modules.dep" ]; then
+            cp "$MODULE_DIR/modules.dep" "$BUILD_DIR$MODULE_DIR/"
+        fi
+        
+        # Copy essential USB modules
+        for module in usbcore usb_common hid hid_generic uhci_hcd ohci_hcd ehci_hcd xhci_hcd usb_storage; do
+            MODULE_PATH=$(find "$MODULE_DIR" -name "${module}.ko*" | head -n 1)
+            if [ -n "$MODULE_PATH" ]; then
+                TARGET_DIR=$(dirname "${MODULE_PATH#$MODULE_DIR}")
+                mkdir -p "$BUILD_DIR$MODULE_DIR/$TARGET_DIR"
+                cp "$MODULE_PATH" "$BUILD_DIR$MODULE_DIR/$TARGET_DIR/"
+                echo "Copied module: $module"
+            fi
+        done
+    else
+        echo "WARNING: Could not find kernel modules directory for kernel $RUNNING_KERNEL"
+    fi
+    
     # Create essential symlinks
     cd "$BUILD_DIR/bin"
-    for cmd in sh sleep echo cat clear date grep mkdir touch ls; do
+    for cmd in sh sleep echo cat clear date grep mkdir touch ls modprobe insmod lsmod rmmod find; do
         ln -sf busybox $cmd
     done
     cd - > /dev/null
@@ -798,7 +1148,11 @@ build_initramfs() {
     # Create init script
     create_init_script
     
+    # Make init script executable
+    chmod +x "$BUILD_DIR/init"
+    
     # Package the initramfs
+    echo "Packaging initramfs image..."
     cd "$BUILD_DIR"
     find . | cpio -H newc -o | gzip > "/tmp/$INITRAMFS_NAME"
     cd - > /dev/null
@@ -842,6 +1196,9 @@ menuentry 'GrubPower Advanced: USB Power Mode' {
     initrd $OUTPUT_DIR/$INITRAMFS_NAME
 }
 EOF
+    
+    # Always create the recovery entry
+    create_recovery_grub_entry
     
     # Update GRUB configuration
     echo "Updating GRUB configuration..."
@@ -896,14 +1253,17 @@ Options:
   --install       Install GRUB entry only
   --uninstall     Remove GrubPower from system
   --full          Perform full installation (default)
+  --full-debug    Perform full installation with verbose debugging
   --interactive   Run interactive configuration wizard
   --compatibility Check hardware compatibility only
   --test-usb      Test USB power management capabilities
   --check-update  Check for GrubPower updates
   --version       Display version information
+  --direct        Perform direct installation (bypasses problematic parts)
 
 Example:
   sudo $0 --full             # Complete installation
+  sudo $0 --full-debug       # Complete installation with debugging
   sudo $0 --interactive      # Run interactive setup wizard
   sudo $0 --configure        # Edit configuration only
   sudo $0 --uninstall        # Remove GrubPower
@@ -939,33 +1299,115 @@ uninstall() {
         echo "Removed initramfs from $OUTPUT_DIR/$INITRAMFS_NAME"
     fi
     
-    # Remove GRUB entry
+    # Delete old init file if it exists
+    if [ -f "/init" ]; then
+        rm -f "/init"
+        echo "Removed old init file from root filesystem"
+    fi
+    
+    # Cleanup any leftover build files
+    if [ -d "$BUILD_DIR" ]; then
+        rm -rf "$BUILD_DIR"
+        echo "Removed build directory: $BUILD_DIR"
+    fi
+    
+    # Find and display GRUB entries
     if [ -f "$GRUB_CUSTOM" ]; then
         BACKUP_FILE="${GRUB_CUSTOM}.bak.uninstall.$(date +%Y%m%d%H%M%S)"
         cp "$GRUB_CUSTOM" "$BACKUP_FILE"
-        sed -i '/GrubPower/,/}/d' "$GRUB_CUSTOM"
-        echo "Removed GrubPower entry from GRUB configuration"
+        echo "Created backup of GRUB configuration at $BACKUP_FILE"
         
-        # Update GRUB
-        if command -v update-grub &> /dev/null; then
-            update-grub
-        elif command -v grub-mkconfig &> /dev/null; then
-            grub-mkconfig -o /boot/grub/grub.cfg
-        elif command -v grub2-mkconfig &> /dev/null; then
-            grub2-mkconfig -o /boot/grub2/grub.cfg
+        # Find all GrubPower entries
+        echo "Scanning for GrubPower GRUB entries..."
+        
+        # Extract menuentry lines with GrubPower
+        ENTRIES=($(grep -n "menuentry.*GrubPower" "$GRUB_CUSTOM" | sed 's/:.*//' || echo ""))
+        ENTRY_NAMES=($(grep "menuentry.*GrubPower" "$GRUB_CUSTOM" | sed "s/menuentry[[:space:]]*'\([^']*\)'.*/\1/" || echo ""))
+        
+        if [ ${#ENTRIES[@]} -eq 0 ]; then
+            echo "No GrubPower GRUB entries found."
         else
-            echo "WARNING: Could not find GRUB update command."
-            echo "Please manually update your GRUB configuration."
+            echo "Found ${#ENTRIES[@]} GrubPower entries:"
+            
+            # Display entries with numbers
+            for i in "${!ENTRIES[@]}"; do
+                echo "$((i+1)). ${ENTRY_NAMES[$i]}"
+            done
+            
+            echo ""
+            echo "Enter the numbers of entries you want to remove (e.g., 1 2 3),"
+            echo "or 'all' to remove all entries, or 'none' to keep all entries."
+            read -p "Your choice: " CHOICE
+            
+            if [ "$CHOICE" = "all" ]; then
+                # Remove all entries
+                sed -i '/# GrubPower/d' "$GRUB_CUSTOM"
+                sed -i '/GrubPower/,/}/d' "$GRUB_CUSTOM"
+                sed -i '/menuentry.*GrubPower/,/}/d' "$GRUB_CUSTOM"
+                echo "Removed all GrubPower entries from GRUB configuration."
+            elif [ "$CHOICE" = "none" ]; then
+                echo "No entries removed."
+            else
+                # Process selected entries
+                for num in $CHOICE; do
+                    if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#ENTRIES[@]} ]; then
+                        LINE_NUM=${ENTRIES[$((num-1))]}
+                        
+                        # Find the end of the entry (next closing brace)
+                        END_LINE=$(tail -n +$LINE_NUM "$GRUB_CUSTOM" | grep -n "}" | head -n 1 | cut -d: -f1)
+                        END_LINE=$((LINE_NUM + END_LINE))
+                        
+                        # Remove the entry
+                        sed -i "${LINE_NUM},${END_LINE}d" "$GRUB_CUSTOM"
+                        echo "Removed entry: ${ENTRY_NAMES[$((num-1))]}"
+                        
+                        # Remove any associated comment line if it exists
+                        COMMENT_LINE=$((LINE_NUM - 1))
+                        if [ $COMMENT_LINE -ge 1 ]; then
+                            if grep -q "# GrubPower" <(sed "${COMMENT_LINE}q;d" "$GRUB_CUSTOM"); then
+                                sed -i "${COMMENT_LINE}d" "$GRUB_CUSTOM"
+                            fi
+                        fi
+                    else
+                        echo "Invalid entry number: $num - skipping"
+                    fi
+                done
+            fi
+            
+            # Clean up empty lines at the end of the file
+            sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$GRUB_CUSTOM"
+            
+            # Update GRUB
+            echo "Updating GRUB configuration..."
+            if command -v update-grub &> /dev/null; then
+                update-grub
+            elif command -v grub-mkconfig &> /dev/null; then
+                grub-mkconfig -o /boot/grub/grub.cfg
+            elif command -v grub2-mkconfig &> /dev/null; then
+                grub2-mkconfig -o /boot/grub2/grub.cfg
+            else
+                echo "WARNING: Could not find GRUB update command."
+                echo "Please manually update your GRUB configuration."
+            fi
         fi
+    else
+        echo "GRUB custom configuration file not found at $GRUB_CUSTOM"
     fi
     
-    # Remove config file
-    if [ -f "$CONFIG_FILE" ]; then
-        rm -f "$CONFIG_FILE"
-        echo "Removed configuration file $CONFIG_FILE"
+    # Ask if user wants to remove the configuration file
+    read -p "Do you want to remove the GrubPower configuration file? (y/n): " REMOVE_CONFIG
+    if [[ "$REMOVE_CONFIG" =~ ^[Yy]$ ]]; then
+        if [ -f "$CONFIG_FILE" ]; then
+            rm -f "$CONFIG_FILE"
+            echo "Removed configuration file $CONFIG_FILE"
+        else
+            echo "Configuration file not found at $CONFIG_FILE"
+        fi
+    else
+        echo "Configuration file kept at $CONFIG_FILE"
     fi
     
-    echo "GrubPower has been uninstalled."
+    echo "GrubPower uninstallation completed."
 }
 
 # Main installation function
@@ -989,8 +1431,34 @@ install_grubpower() {
     # Load configuration
     load_config
     
-    # Detect system configuration
+    # First try to auto-detect the kernel path
+    if detect_kernel; then
+        echo "Successfully auto-detected kernel: $KERNEL_PATH"
+    else
+        # If auto-detection fails, let user select from available kernels
+        echo "Auto-detection failed. Showing available kernels for selection..."
+        select_kernel
+    fi
+    
+    # Detect other system configuration elements
     detect_system
+    
+    # Verify the kernel path before continuing
+    if [ ! -f "$KERNEL_PATH" ]; then
+        echo "ERROR: The selected kernel path is invalid: $KERNEL_PATH"
+        echo "Please specify a valid kernel path and try again:"
+        read -p "Enter full path to kernel (e.g., /boot/vmlinuz-linux): " MANUAL_KERNEL
+        if [ -n "$MANUAL_KERNEL" ] && [ -f "$MANUAL_KERNEL" ]; then
+            KERNEL_PATH="$MANUAL_KERNEL"
+            sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+            echo "Kernel path updated to: $KERNEL_PATH"
+        else
+            echo "Invalid kernel path. Installation cannot continue."
+            exit 1
+        fi
+    else
+        echo "Verified kernel path: $KERNEL_PATH"
+    fi
     
     # Build initramfs
     build_initramfs
@@ -1004,7 +1472,7 @@ install_grubpower() {
     # Clean up
     cleanup
     
-    # Show success message
+    # Show success message with verification of kernel path
     cat <<EOF
 
 ====================================
@@ -1016,6 +1484,7 @@ To use:
 3. Your USB ports should remain powered
 
 Configuration file: $CONFIG_FILE
+Kernel path: $KERNEL_PATH
 Initramfs location: $OUTPUT_DIR/$INITRAMFS_NAME
 
 NOTE: This is experimental. Battery will drain while in this mode.
@@ -1024,6 +1493,418 @@ NOTE: This is experimental. Battery will drain while in this mode.
       which will automatically boot your main OS after 30 seconds.
 ====================================
 EOF
+}
+
+# Full debug installation mode
+install_grubpower_debug() {
+    echo "Starting GrubPower Advanced installation with verbose debugging..."
+    
+    # Set bash to verbose mode
+    set -x
+    
+    # Check for updates
+    check_for_updates
+    
+    # Check hardware compatibility
+    check_compatibility
+    
+    # Test USB power management
+    test_usb_power
+    
+    # Load configuration
+    load_config
+    
+    # Run kernel path debugging
+    debug_kernel_path
+    
+    echo "Using debug mode to fix kernel loading issue: 'error: file \"/boot/vmlinuz-6.8.0-57-genenic\" not found'"
+    
+    # Check for genenic vs generic typo specifically
+    if [[ "$KERNEL_PATH" == *"genenic"* ]]; then
+        FIXED_PATH="${KERNEL_PATH//genenic/generic}"
+        echo "Corrected kernel path from: $KERNEL_PATH"
+        echo "                        to: $FIXED_PATH"
+        
+        # Verify the fixed path exists
+        if [ -f "$FIXED_PATH" ]; then
+            echo "SUCCESS: Found correct kernel at $FIXED_PATH"
+            KERNEL_PATH="$FIXED_PATH"
+            sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+        else
+            echo "ERROR: Fixed path does not exist. Continuing kernel detection..."
+        fi
+    fi
+    
+    # More rigorous kernel path detection for debug mode
+    echo "Searching for all available kernel images in /boot..."
+    find /boot -name "vmlinuz*" -type f | sort -V
+    
+    # Check running kernel
+    RUNNING_KERNEL=$(uname -r)
+    echo "Current running kernel: $RUNNING_KERNEL"
+    
+    if detect_kernel; then
+        echo "Successfully auto-detected kernel: $KERNEL_PATH"
+    else
+        echo "Auto-detection failed. Showing available kernels for selection..."
+        select_kernel
+    fi
+    
+    # Enhanced GRUB root detection
+    echo "Checking GRUB root setting..."
+    if command -v grub-probe &> /dev/null; then
+        GRUB_PROBE_BOOT=$(grub-probe -t drive /boot 2>/dev/null || echo "Error")
+        if [ "$GRUB_PROBE_BOOT" != "Error" ]; then
+            echo "GRUB probe reports /boot as: $GRUB_PROBE_BOOT"
+            
+            # Extract actual GRUB root format
+            if [[ "$GRUB_PROBE_BOOT" =~ \(([^)]+)\) ]]; then
+                DETECTED_GRUB="${BASH_REMATCH[1]}"
+                echo "Setting GRUB_ROOT to: $DETECTED_GRUB"
+                GRUB_ROOT="$DETECTED_GRUB"
+                sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
+            else
+                echo "ERROR: Could not parse GRUB root from grub-probe output."
+                echo "Please manually set GRUB_ROOT in $CONFIG_FILE."
+                exit 1
+            fi
+                DETECTED_GRUB="${BASH_REMATCH[1]}"
+                echo "Setting GRUB_ROOT to: $DETECTED_GRUB"
+                GRUB_ROOT="$DETECTED_GRUB"
+                sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
+            fi
+        fi
+    fi
+    
+    # Detect other system configuration elements
+    detect_system
+    
+    # Verify the kernel path before continuing
+    if [ ! -f "$KERNEL_PATH" ]; then
+        echo "ERROR: The selected kernel path is still invalid: $KERNEL_PATH"
+        echo "Trying to find a working kernel image..."
+        
+        # Most reliable method: Find running kernel first
+        RUNNING_KERNEL=$(uname -r)
+        if [ -f "/boot/vmlinuz-$RUNNING_KERNEL" ]; then
+            echo "Found running kernel: /boot/vmlinuz-$RUNNING_KERNEL"
+            KERNEL_PATH="/boot/vmlinuz-$RUNNING_KERNEL"
+            sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+        else
+            # Try to find the latest kernel
+            LATEST_KERNEL=$(find /boot -name "vmlinuz*" -type f | sort -V | tail -n 1)
+            if [ -n "$LATEST_KERNEL" ]; then
+                echo "Using latest kernel found: $LATEST_KERNEL"
+                KERNEL_PATH="$LATEST_KERNEL"
+                sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+            else
+                echo "CRITICAL ERROR: Could not find any valid kernel. Manual specification required."
+                read -p "Enter the EXACT full path to your kernel file: " MANUAL_KERNEL
+                if [ -n "$MANUAL_KERNEL" ] && [ -f "$MANUAL_KERNEL" ]; then
+                    KERNEL_PATH="$MANUAL_KERNEL"
+                    sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+                    echo "Kernel path updated to: $KERNEL_PATH"
+                else
+                    echo "Invalid kernel path. Installation cannot continue."
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+    
+    echo "Final kernel path for installation: $KERNEL_PATH"
+    echo "Final GRUB root for installation: $GRUB_ROOT"
+    
+    # Double check file accessibility
+    ls -la "$KERNEL_PATH" || echo "WARNING: Cannot access kernel file with ls command"
+    
+    # Build initramfs
+    build_initramfs
+    
+    # Create GRUB entries with extra verification on paths
+    echo "Generating GRUB entries with verified paths..."
+    echo "Kernel path: $KERNEL_PATH (exists: $([ -f "$KERNEL_PATH" ] && echo "YES" || echo "NO"))"
+    echo "GRUB root: $GRUB_ROOT"
+    echo "Initramfs: $OUTPUT_DIR/$INITRAMFS_NAME (exists: $([ -f "$OUTPUT_DIR/$INITRAMFS_NAME" ] && echo "YES" || echo "NO"))"
+    
+    # Create GRUB entry with extra quotes to ensure proper escaping
+    cat <<EOF > "/tmp/grubpower-menuentry.txt"
+# GrubPower Advanced USB Power Mode entry (Debug)
+menuentry 'GrubPower Advanced: USB Power Mode' {
+    set root=($GRUB_ROOT)
+    linux "$KERNEL_PATH" quiet init=/init acpi=force acpi_osi=Linux acpi_backlight=vendor $EXTRA_KERNEL_PARAMS
+    initrd "$OUTPUT_DIR/$INITRAMFS_NAME"
+}
+
+# GrubPower Recovery Boot Entry (automatically boots main OS after 30 seconds)
+menuentry 'GrubPower: Recovery Mode (Auto-boot in 30s)' {
+    set timeout=30
+    set default=0
+    terminal_output console
+    echo "GrubPower Recovery Mode: Will boot main OS in 30 seconds..."
+    echo "Press any key to enter GRUB menu immediately."
+    sleep 30
+    configfile /boot/grub/grub.cfg
+}
+EOF
+    
+    # Make backup of GRUB custom
+    BACKUP_FILE="${GRUB_CUSTOM}.bak.debug.$(date +%Y%m%d%H%M%S)"
+    cp "$GRUB_CUSTOM" "$BACKUP_FILE"
+    echo "Backed up GRUB configuration to $BACKUP_FILE"
+    
+    # Add entries to GRUB custom file
+    cat "/tmp/grubpower-menuentry.txt" >> "$GRUB_CUSTOM"
+    
+    # Display the resulting GRUB entries
+    echo "Added GRUB entries:"
+    cat "/tmp/grubpower-menuentry.txt"
+    
+    # Update GRUB configuration with detailed output
+    echo "Updating GRUB configuration..."
+    if command -v update-grub &> /dev/null; then
+        update-grub -v
+    elif command -v grub-mkconfig &> /dev/null; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+    elif command -v grub2-mkconfig &> /dev/null; then
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+    else
+        echo "WARNING: Could not find GRUB update command."
+        echo "Please manually update your GRUB configuration with: grub-mkconfig -o /boot/grub/grub.cfg"
+    fi
+    
+    # Restore non-verbose mode
+    set +x
+    
+    # Clean up
+    cleanup
+    
+    # Show detailed success message with all configuration details
+    cat <<EOF
+
+====================================
+GrubPower Advanced DEBUG installation complete!
+
+CONFIGURATION DETAILS:
+- Kernel path: $KERNEL_PATH
+- GRUB root: $GRUB_ROOT
+- Initramfs: $OUTPUT_DIR/$INITRAMFS_NAME
+- Config file: $CONFIG_FILE
+
+NEXT STEPS:
+1. Reboot your computer
+2. At the GRUB menu, select 'GrubPower Advanced: USB Power Mode'
+3. If you still see the kernel not found error, try one of:
+   a. Run 'sudo $(basename "$0") --rebuild-grub' to rebuild with correct paths
+   b. Edit $CONFIG_FILE and fix the KERNEL_PATH manually
+   c. Run this script again with --full-debug
+
+====================================
+EOF
+}
+
+# Direct installation function (bypasses problematic parts of the main script)
+direct_install() {
+    echo "GrubPower Direct Installation"
+    echo "============================"
+
+    # Load configuration
+    create_default_config
+    source "$CONFIG_FILE"
+
+    echo "Using the following settings:"
+    echo "- Kernel path: $KERNEL_PATH"
+    echo "- GRUB root: $GRUB_ROOT"
+    echo "- Output directory: $OUTPUT_DIR"
+    echo "- Initramfs name: $INITRAMFS_NAME"
+
+    # Verify kernel path
+    if [ ! -f "$KERNEL_PATH" ]; then
+        echo "ERROR: Kernel not found at $KERNEL_PATH"
+        echo "Attempting to find kernel automatically..."
+        
+        # Try to find running kernel
+        RUNNING_KERNEL=$(uname -r)
+        if [ -f "/boot/vmlinuz-$RUNNING_KERNEL" ]; then
+            KERNEL_PATH="/boot/vmlinuz-$RUNNING_KERNEL"
+            echo "Found running kernel at $KERNEL_PATH"
+        else
+            # Try to find any kernel
+            DETECTED_KERNEL=$(find /boot -name "vmlinuz-*" | sort -V | tail -n 1)
+            if [ -n "$DETECTED_KERNEL" ] && [ -f "$DETECTED_KERNEL" ]; then
+                KERNEL_PATH="$DETECTED_KERNEL"
+                echo "Found kernel at $KERNEL_PATH"
+            else
+                echo "ERROR: Could not find a valid kernel. Installation aborted."
+                exit 1
+            fi
+        fi
+        
+        # Update config
+        sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$KERNEL_PATH\"|" "$CONFIG_FILE"
+        echo "Updated configuration with new kernel path: $KERNEL_PATH"
+    else
+        echo "Verified kernel exists at $KERNEL_PATH"
+    fi
+
+    # Create build directory
+    echo "Creating build environment..."
+    mkdir -p "$BUILD_DIR"/{bin,dev,proc,sys,usr/lib/modules,var/log,etc/acpi/events,lib/modules}
+
+    # Install busybox
+    if command -v busybox &> /dev/null; then
+        cp $(which busybox) "$BUILD_DIR/bin/"
+        echo "Installed busybox"
+    else
+        echo "ERROR: Busybox not found. Please install it with 'sudo apt install busybox-static'"
+        exit 1
+    fi
+
+    # Create symlinks
+    echo "Creating essential symlinks..."
+    cd "$BUILD_DIR/bin"
+    for cmd in sh sleep echo cat clear date grep mkdir touch ls modprobe insmod lsmod rmmod find; do
+        ln -sf busybox $cmd
+    done
+    cd - > /dev/null
+
+    # Create basic init script
+    echo "Creating init script..."
+    cat > "$BUILD_DIR/init" << 'EOFSCRIPT'
+#!/bin/sh
+# GrubPower init script
+
+echo "GrubPower USB Power Mode initializing..."
+
+# Mount essential filesystems
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+# Load USB modules
+echo "Loading USB modules..."
+modprobe usbcore
+modprobe usb_common
+modprobe ehci_hcd || true
+modprobe ohci_hcd || true
+modprobe uhci_hcd || true
+modprobe xhci_hcd || true
+
+# Wait for USB subsystem
+sleep 3
+
+# Enable USB power
+echo "Enabling USB power..."
+for i in /sys/bus/usb/devices/*/power/control; do
+    if [ -f "$i" ]; then
+        echo "on" > "$i" 2>/dev/null || true
+        echo "Power enabled for $i"
+    fi
+done
+
+# Disable USB autosuspend
+for i in /sys/bus/usb/devices/*/power/autosuspend; do
+    if [ -f "$i" ]; then
+        echo "-1" > "$i" 2>/dev/null || true
+    fi
+done
+
+# Print status
+clear
+echo "======================================"
+echo "GrubPower USB Power Mode Activated"
+echo "======================================"
+echo "All USB ports are now powered"
+echo ""
+echo "IMPORTANT: Battery will drain in this mode!"
+echo "Press CTRL+ALT+DEL to reboot"
+echo "======================================"
+
+# Keep system alive
+while true; do
+    # Refresh USB power settings every minute
+    if [ $(($(date +%s) % 60)) -eq 0 ]; then
+        for i in /sys/bus/usb/devices/*/power/control; do
+            if [ -f "$i" ]; then
+                echo "on" > "$i" 2>/dev/null || true
+            fi
+        done
+    fi
+    sleep 5
+done
+EOFSCRIPT
+
+    # Make init script executable
+    chmod +x "$BUILD_DIR/init"
+
+    # Package the initramfs
+    echo "Building initramfs image..."
+    cd "$BUILD_DIR"
+    find . | cpio -H newc -o | gzip > "/tmp/$INITRAMFS_NAME"
+    cd - > /dev/null
+
+    # Copy to output directory
+    sudo cp "/tmp/$INITRAMFS_NAME" "$OUTPUT_DIR/"
+    echo "Initramfs created at $OUTPUT_DIR/$INITRAMFS_NAME"
+
+    # Backup GRUB custom file
+    BACKUP_FILE="${GRUB_CUSTOM}.bak.$(date +%Y%m%d%H%M%S)"
+    sudo cp "$GRUB_CUSTOM" "$BACKUP_FILE"
+    echo "Backed up GRUB configuration to $BACKUP_FILE"
+
+    # Add GRUB entry
+    echo "Adding GRUB menu entry..."
+    sudo bash -c "cat >> $GRUB_CUSTOM << EOFGRUB
+
+# GrubPower USB Power Mode entry
+menuentry 'GrubPower: USB Power Mode' {
+    set root=($GRUB_ROOT)
+    linux $KERNEL_PATH quiet init=/init acpi=force
+    initrd $OUTPUT_DIR/$INITRAMFS_NAME
+}
+
+# GrubPower Recovery Mode entry
+menuentry 'GrubPower: Recovery Mode (Auto-boot in 30s)' {
+    set timeout=30
+    set default=0
+    terminal_output console
+    echo 'GrubPower Recovery Mode - Will boot main OS in 30 seconds...'
+    echo 'Press any key to enter GRUB menu immediately.'
+    sleep 30
+    configfile /boot/grub/grub.cfg
+}
+EOFGRUB"
+
+    # Update GRUB
+    echo "Updating GRUB configuration..."
+    if command -v update-grub &> /dev/null; then
+        sudo update-grub
+    elif command -v grub-mkconfig &> /dev/null; then
+        sudo grub-mkconfig -o /boot/grub/grub.cfg
+    elif command -v grub2-mkconfig &> /dev/null; then
+        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+    else
+        echo "WARNING: Could not find GRUB update command."
+        echo "Please manually update your GRUB configuration with:"
+        echo "sudo grub-mkconfig -o /boot/grub/grub.cfg"
+    fi
+
+    # Clean up
+    echo "Cleaning up..."
+    rm -rf "$BUILD_DIR"
+    rm -f "/tmp/$INITRAMFS_NAME"
+
+    echo ""
+    echo "Installation completed successfully!"
+    echo "======================================"
+    echo "To use GrubPower USB Power Mode:"
+    echo "1. Reboot your computer"
+    echo "2. At the GRUB menu, select 'GrubPower: USB Power Mode'"
+    echo "3. Your USB ports should remain powered"
+    echo ""
+    echo "If you have any issues, use the Recovery Mode option"
+    echo "which will automatically boot your main OS after 30 seconds."
+    echo "======================================"
 }
 
 # Process command line arguments
@@ -1083,6 +1964,12 @@ else
             create_recovery_grub_entry
             cleanup
             echo "GRUB entry rebuilt. Please reboot to test the fix."
+            ;;
+        --full-debug)
+            install_grubpower_debug
+            ;;
+        --direct)
+            direct_install
             ;;
         *)
             echo "Unknown option: $1"

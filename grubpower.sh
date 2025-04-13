@@ -20,6 +20,63 @@ INITRAMFS_NAME="grubpower-initramfs.img"
 BUILD_DIR="/tmp/grubpower_build"   # Temporary build directory
 GRUB_CUSTOM="/etc/grub.d/40_custom"  # GRUB custom config file
 
+# Function for uninstalling GrubPower
+uninstall() {
+    echo "Uninstalling GrubPower..."
+    
+    # Remove initramfs
+    if [ -f "$OUTPUT_DIR/$INITRAMFS_NAME" ]; then
+        rm -f "$OUTPUT_DIR/$INITRAMFS_NAME"
+        echo "Removed initramfs from $OUTPUT_DIR/$INITRAMFS_NAME"
+    fi
+    
+    # Delete old init file if it exists
+    if [ -f "/init" ]; then
+        rm -f "/init"
+        echo "Removed old init file from root filesystem"
+    fi
+    
+    # Cleanup any leftover build files
+    if [ -d "$BUILD_DIR" ]; then
+        rm -rf "$BUILD_DIR"
+        echo "Removed build directory: $BUILD_DIR"
+    fi
+    
+    # Remove the GRUB entry
+    if [ -f "$GRUB_CUSTOM" ]; then
+        BACKUP_FILE="${GRUB_CUSTOM}.bak.uninstall.$(date +%Y%m%d%H%M%S)"
+        cp "$GRUB_CUSTOM" "$BACKUP_FILE"
+        echo "Created backup of GRUB configuration at $BACKUP_FILE"
+        
+        # Remove GrubPower entries from GRUB configuration
+        sed -i '/# GrubPower/d' "$GRUB_CUSTOM"
+        sed -i '/GrubPower/,/}/d' "$GRUB_CUSTOM"
+        
+        # Update GRUB configuration
+        echo "Updating GRUB configuration..."
+        if command -v update-grub &> /dev/null; then
+            update-grub
+        elif command -v grub-mkconfig &> /dev/null; then
+            grub-mkconfig -o /boot/grub/grub.cfg
+        elif command -v grub2-mkconfig &> /dev/null; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg
+        else
+            echo "WARNING: Could not find GRUB update command."
+            echo "Please manually update your GRUB configuration."
+        fi
+    else
+        echo "GRUB custom configuration file not found at $GRUB_CUSTOM"
+    fi
+    
+    echo "GrubPower uninstallation completed."
+    exit 0
+}
+
+# Process command-line arguments
+if [ "$1" = "--uninstall" ]; then
+    uninstall
+fi
+
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run as root. Please use sudo."
@@ -135,6 +192,22 @@ menuentry 'GrubPower: USB Power Mode' {
     set root=($GRUB_ROOT)
     linux $KERNEL_PATH quiet init=/init acpi=force
     initrd $OUTPUT_DIR/$INITRAMFS_NAME
+}
+EOF
+
+# Add recovery GRUB entry
+echo "Adding recovery GRUB entry..."
+cat <<EOF >> "$GRUB_CUSTOM"
+
+# GrubPower Recovery Boot Entry (automatically boots main OS after 30 seconds)
+menuentry 'GrubPower: Recovery Mode (Auto-boot in 30s)' {
+    set timeout=30
+    set default=0
+    terminal_output console
+    echo "GrubPower Recovery Mode: Will boot main OS in 30 seconds..."
+    echo "Press any key to enter GRUB menu immediately."
+    sleep 30
+    configfile /boot/grub/grub.cfg
 }
 EOF
 
