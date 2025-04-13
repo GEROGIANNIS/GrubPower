@@ -101,7 +101,7 @@ check_compatibility() {
                     echo "Attempting to load USB modules..."
                     modprobe usbcore 2>/dev/null && echo "Loaded: usbcore" || echo "Failed to load: usbcore"
                     modprobe usb_common 2>/dev/null && echo "Loaded: usb_common" || echo "Failed to load: usb_common"
-                    modprobe ehci_hcd 2>/dev/null && echo "Loaded: ehci_hcd" || echo "Failed to load: ehci_hcd"
+                    modprobe ehci_hcd 2>/devnull && echo "Loaded: ehci_hcd" || echo "Failed to load: ehci_hcd"
                     modprobe ohci_hcd 2>/dev/null && echo "Loaded: ohci_hcd" || echo "Failed to load: ohci_hcd"
                     modprobe uhci_hcd 2>/dev/null && echo "Loaded: uhci_hcd" || echo "Failed to load: uhci_hcd"
                     modprobe xhci_hcd 2>/dev/null && echo "Loaded: xhci_hcd" || echo "Failed to load: xhci_hcd"
@@ -324,14 +324,64 @@ detect_system() {
     
     # Detect kernel path if default doesn't exist
     if [ ! -f "$KERNEL_PATH" ]; then
+        echo "Kernel not found at $KERNEL_PATH, searching for alternatives..."
+        
+        # Method 1: Find all vmlinuz files and pick the latest
         DETECTED_KERNEL=$(find /boot -name "vmlinuz-*" | sort -V | tail -n 1)
-        if [ -n "$DETECTED_KERNEL" ]; then
+        
+        # Method 2: If method 1 fails, try to find the running kernel
+        if [ -z "$DETECTED_KERNEL" ] || [ ! -f "$DETECTED_KERNEL" ]; then
+            RUNNING_KERNEL=$(uname -r)
+            if [ -f "/boot/vmlinuz-$RUNNING_KERNEL" ]; then
+                DETECTED_KERNEL="/boot/vmlinuz-$RUNNING_KERNEL"
+            fi
+        fi
+        
+        # Check if kernel was found
+        if [ -n "$DETECTED_KERNEL" ] && [ -f "$DETECTED_KERNEL" ]; then
             echo "Detected kernel: $DETECTED_KERNEL"
             sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$DETECTED_KERNEL\"|" "$CONFIG_FILE"
             KERNEL_PATH="$DETECTED_KERNEL"
+            
+            # Verify the kernel file exists (double-check)
+            if [ ! -f "$KERNEL_PATH" ]; then
+                echo "ERROR: Detected kernel file doesn't exist: $KERNEL_PATH"
+                echo "Please specify the correct kernel path manually in $CONFIG_FILE"
+                exit 1
+            fi
         else
-            echo "ERROR: Could not detect kernel. Please set KERNEL_PATH in $CONFIG_FILE."
-            exit 1
+            # If no kernel found, prompt for manual entry and show available kernels
+            echo "ERROR: Could not detect kernel automatically."
+            echo "Available kernels in /boot:"
+            ls -la /boot/vmlinuz* 2>/dev/null || echo "  No vmlinuz files found in /boot"
+            echo ""
+            read -p "Please enter the full path to your kernel file: " MANUAL_KERNEL
+            if [ -n "$MANUAL_KERNEL" ] && [ -f "$MANUAL_KERNEL" ]; then
+                echo "Using manually specified kernel: $MANUAL_KERNEL"
+                sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$MANUAL_KERNEL\"|" "$CONFIG_FILE"
+                KERNEL_PATH="$MANUAL_KERNEL"
+            else
+                echo "Invalid kernel path or file not found. Please set KERNEL_PATH in $CONFIG_FILE manually."
+                exit 1
+            fi
+        fi
+    else
+        # Even if the kernel path exists in config, verify it's valid
+        if [ ! -f "$KERNEL_PATH" ]; then
+            echo "WARNING: Configured kernel path doesn't exist: $KERNEL_PATH"
+            echo "Attempting to find a valid kernel..."
+            
+            # Try to find any kernel
+            AVAILABLE_KERNEL=$(find /boot -name "vmlinuz-*" | sort -V | tail -n 1)
+            if [ -n "$AVAILABLE_KERNEL" ] && [ -f "$AVAILABLE_KERNEL" ]; then
+                echo "Found kernel: $AVAILABLE_KERNEL"
+                sed -i "s|KERNEL_PATH=.*|KERNEL_PATH=\"$AVAILABLE_KERNEL\"|" "$CONFIG_FILE"
+                KERNEL_PATH="$AVAILABLE_KERNEL"
+            else
+                echo "ERROR: No valid kernel found in /boot directory."
+                echo "Please specify the correct kernel path manually in $CONFIG_FILE"
+                exit 1
+            fi
         fi
     fi
     
@@ -760,13 +810,29 @@ build_initramfs() {
 
 # Create GRUB entry
 create_grub_entry() {
+    # Verify kernel path before proceeding
+    if [ ! -f "$KERNEL_PATH" ]; then
+        echo "ERROR: Kernel not found at $KERNEL_PATH"
+        echo "Please correct the kernel path in $CONFIG_FILE"
+        exit 1
+    fi
+    
+    # Verify that the initramfs was created
+    if [ ! -f "$OUTPUT_DIR/$INITRAMFS_NAME" ]; then
+        echo "ERROR: Initramfs not found at $OUTPUT_DIR/$INITRAMFS_NAME"
+        echo "Build process appears to have failed"
+        exit 1
+    fi
+    
     # Backup GRUB custom config
     BACKUP_FILE="${GRUB_CUSTOM}.bak.$(date +%Y%m%d%H%M%S)"
     cp "$GRUB_CUSTOM" "$BACKUP_FILE"
     echo "Backed up GRUB configuration to $BACKUP_FILE"
     
-    # Add GRUB menu entry
+    # Add GRUB menu entry with verified paths
     echo "Adding advanced GRUB menu entry..."
+    echo "Using kernel: $KERNEL_PATH"
+    echo "Using initramfs: $OUTPUT_DIR/$INITRAMFS_NAME"
     cat <<EOF >> "$GRUB_CUSTOM"
 
 # GrubPower Advanced USB Power Mode entry
@@ -1005,6 +1071,18 @@ else
             ;;
         --version)
             echo "GrubPower Advanced version $VERSION"
+            ;;
+        --rebuild-grub)
+            echo "Rebuilding GRUB entry with correct kernel path..."
+            uninstall
+            echo "Now reinstalling with proper kernel detection..."
+            load_config
+            detect_system
+            build_initramfs
+            create_grub_entry
+            create_recovery_grub_entry
+            cleanup
+            echo "GRUB entry rebuilt. Please reboot to test the fix."
             ;;
         *)
             echo "Unknown option: $1"
