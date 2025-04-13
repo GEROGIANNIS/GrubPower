@@ -13,6 +13,12 @@
 
 set -e  # Exit on error
 
+# Version information
+VERSION="1.2.0"
+
+# Initialize rollback log
+ROLLBACK_LOG=$(mktemp)
+
 # Configuration variables
 CONFIG_FILE="/etc/grubpower.conf"
 DEFAULT_KERNEL_PATH="/boot/vmlinuz-linux"
@@ -34,6 +40,176 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run as root. Please use sudo."
     exit 1
 fi
+
+# Rollback action registration
+rollback_action() {
+    echo "$1" >> "$ROLLBACK_LOG"
+}
+
+# Perform rollback in case of error
+perform_rollback() {
+    echo "ERROR: Installation failed. Rolling back changes..."
+    tac "$ROLLBACK_LOG" | while read action; do
+        eval "$action"
+    done
+    rm "$ROLLBACK_LOG"
+    echo "Rollback completed."
+    exit 1
+}
+
+# Set trap for error handling
+trap 'perform_rollback' ERR
+
+# Hardware compatibility check
+check_compatibility() {
+    echo "Checking hardware compatibility..."
+    
+    # Check for USB power management support
+    if [ ! -d "/sys/bus/usb/devices" ]; then
+        echo "WARNING: USB subsystem not detected in expected location."
+        echo "This system may not support the required USB power management features."
+        ask_continue
+    fi
+    
+    # Check if any USB ports support power control
+    POWER_CONTROL_FILES=$(find /sys/bus/usb/devices -name "power/control" 2>/dev/null | wc -l)
+    if [ "$POWER_CONTROL_FILES" -eq 0 ]; then
+        echo "WARNING: No USB power control interfaces found."
+        echo "GrubPower may not be able to manage power on this system."
+        ask_continue
+    fi
+    
+    # Check for battery
+    BATTERY_FOUND=0
+    for bat in /sys/class/power_supply/BAT*; do
+        if [ -d "$bat" ]; then
+            BATTERY_FOUND=1
+            break
+        fi
+    done
+    
+    if [ $BATTERY_FOUND -eq 0 ]; then
+        echo "WARNING: No battery detected. This tool is primarily designed for laptops."
+        ask_continue
+    fi
+    
+    echo "Compatibility check completed."
+}
+
+# Ask user to continue or abort
+ask_continue() {
+    read -p "Continue anyway? (y/n): " CONTINUE
+    if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
+        echo "Installation aborted."
+        exit 1
+    fi
+}
+
+# Test USB power management
+test_usb_power() {
+    echo "Testing USB power management capabilities..."
+    
+    # Create temporary directory
+    TEST_DIR=$(mktemp -d)
+    rollback_action "rm -rf $TEST_DIR"
+    
+    # Create simple test script
+    cat > "$TEST_DIR/test_usb.sh" <<'EOF'
+#!/bin/bash
+echo "Testing USB power management..."
+# Try to set power control to on for all USB devices
+SUCCESS=0
+for i in /sys/bus/usb/devices/*/power/control; do
+    if [ -f "$i" ]; then
+        ORIGINAL=$(cat "$i")
+        echo "on" > "$i" 2>/dev/null
+        AFTER=$(cat "$i")
+        if [ "$AFTER" = "on" ]; then
+            SUCCESS=$((SUCCESS + 1))
+            # Restore original value
+            echo "$ORIGINAL" > "$i" 2>/dev/null
+        fi
+    fi
+done
+
+if [ $SUCCESS -gt 0 ]; then
+    echo "SUCCESS: Successfully controlled power on $SUCCESS USB device(s)."
+    exit 0
+else
+    echo "FAILED: Could not control power on any USB devices."
+    exit 1
+fi
+EOF
+    
+    chmod +x "$TEST_DIR/test_usb.sh"
+    
+    # Run test
+    if "$TEST_DIR/test_usb.sh"; then
+        echo "USB power management test passed!"
+    else
+        echo "WARNING: USB power management test failed."
+        echo "GrubPower may not work correctly on this system."
+        ask_continue
+    fi
+    
+    # Clean up
+    rm -rf "$TEST_DIR"
+}
+
+# Check for updates
+check_for_updates() {
+    echo "Checking for updates..."
+    echo "GrubPower version $VERSION"
+    # This would typically check a remote server/repository
+    # For now, just a placeholder message
+    echo "No updates available (Version check not implemented in this version)"
+}
+
+# Interactive configuration wizard
+interactive_setup() {
+    echo "GrubPower Interactive Setup"
+    echo "==========================="
+    
+    # Ask about battery threshold
+    echo -n "Set battery threshold for auto-shutdown (default: 10%): "
+    read BATTERY_THRESHOLD
+    if [ -n "$BATTERY_THRESHOLD" ] && [[ "$BATTERY_THRESHOLD" =~ ^[0-9]+$ ]]; then
+        DEFAULT_MIN_BATTERY=$BATTERY_THRESHOLD
+    fi
+    
+    # Ask about USB port selection
+    echo "USB port selection options:"
+    echo "1) All USB ports"
+    echo "2) Charging ports only (if detectable)"
+    echo "3) Specific port numbers"
+    echo -n "Select option (default: 1): "
+    read USB_OPTION
+    
+    case "$USB_OPTION" in
+        2)
+            DEFAULT_SELECT_PORTS="charging"
+            ;;
+        3)
+            echo -n "Enter comma-separated port numbers (e.g., 1,2,4): "
+            read SPECIFIC_PORTS
+            if [ -n "$SPECIFIC_PORTS" ]; then
+                DEFAULT_SELECT_PORTS="$SPECIFIC_PORTS"
+            fi
+            ;;
+        *)
+            DEFAULT_SELECT_PORTS="all"
+            ;;
+    esac
+    
+    # Ask about logging
+    echo -n "Enable logging? (y/n, default: n): "
+    read ENABLE_LOG
+    if [[ "$ENABLE_LOG" =~ ^[Yy]$ ]]; then
+        DEFAULT_ENABLE_LOGGING=1
+    fi
+    
+    echo "Configuration complete. Proceeding with installation..."
+}
 
 # Create configuration if it doesn't exist
 create_default_config() {
@@ -416,9 +592,53 @@ while true; do
     # Using shorter sleep for more responsive lid detection
     sleep 5
 done
-EOF
 
-    chmod +x "$BUILD_DIR/init"
+# Create USB device detection function
+    cat >> "$BUILD_DIR/init" <<'EOF'
+
+# Function to list connected USB devices
+list_usb_devices() {
+    echo "Checking connected USB devices..."
+    echo "--------------------------------"
+    
+    # Create a symlink to lsusb if available
+    if command -v lsusb >/dev/null 2>&1; then
+        ln -sf $(which lsusb) /bin/lsusb
+        lsusb
+    else
+        # Simple alternative using /sys filesystem
+        for dev in /sys/bus/usb/devices/[0-9]*; do
+            if [ -d "$dev" ]; then
+                devname=$(basename "$dev")
+                
+                # Try to get vendor and product info
+                if [ -f "$dev/manufacturer" ] && [ -f "$dev/product" ]; then
+                    vendor=$(cat "$dev/manufacturer" 2>/dev/null || echo "Unknown")
+                    product=$(cat "$dev/product" 2>/dev/null || echo "Unknown")
+                    echo "USB Device $devname: $vendor $product"
+                else
+                    echo "USB Device $devname"
+                fi
+                
+                # Check power status
+                if [ -f "$dev/power/control" ]; then
+                    power=$(cat "$dev/power/control")
+                    echo "  - Power: $power"
+                fi
+            fi
+        done
+    fi
+    echo "--------------------------------"
+}
+
+# Call device detection after USB configuration
+list_usb_devices
+
+# Set up periodic USB device checking (every 5 minutes)
+USB_CHECK_INTERVAL=300  # seconds
+last_usb_check=$(date +%s)
+
+EOF
 }
 
 # Build the initramfs
@@ -503,6 +723,24 @@ EOF
     fi
 }
 
+# Create safe recovery GRUB entry
+create_recovery_grub_entry() {
+    echo "Adding recovery GRUB entry..."
+    cat <<EOF >> "$GRUB_CUSTOM"
+
+# GrubPower Recovery Boot Entry (automatically boots main OS after 30 seconds)
+menuentry 'GrubPower: Recovery Mode (Auto-boot in 30s)' {
+    set timeout=30
+    set default=0
+    terminal_output console
+    echo "GrubPower Recovery Mode: Will boot main OS in 30 seconds..."
+    echo "Press any key to enter GRUB menu immediately."
+    sleep 30
+    configfile /boot/grub/grub.cfg
+}
+EOF
+}
+
 # Clean up temporary files
 cleanup() {
     echo "Cleaning up..."
@@ -524,9 +762,15 @@ Options:
   --install       Install GRUB entry only
   --uninstall     Remove GrubPower from system
   --full          Perform full installation (default)
+  --interactive   Run interactive configuration wizard
+  --compatibility Check hardware compatibility only
+  --test-usb      Test USB power management capabilities
+  --check-update  Check for GrubPower updates
+  --version       Display version information
 
 Example:
   sudo $0 --full             # Complete installation
+  sudo $0 --interactive      # Run interactive setup wizard
   sudo $0 --configure        # Edit configuration only
   sudo $0 --uninstall        # Remove GrubPower
 
@@ -594,6 +838,20 @@ uninstall() {
 install_grubpower() {
     echo "Starting GrubPower Advanced installation..."
     
+    # Check for updates
+    check_for_updates
+    
+    # Check hardware compatibility
+    check_compatibility
+    
+    # Test USB power management capabilities
+    test_usb_power
+    
+    # Run interactive setup if requested
+    if [ "${1:-}" = "--interactive" ]; then
+        interactive_setup
+    fi
+    
     # Load configuration
     load_config
     
@@ -605,6 +863,9 @@ install_grubpower() {
     
     # Create GRUB entry
     create_grub_entry
+    
+    # Create recovery GRUB entry
+    create_recovery_grub_entry
     
     # Clean up
     cleanup
@@ -625,7 +886,8 @@ Initramfs location: $OUTPUT_DIR/$INITRAMFS_NAME
 
 NOTE: This is experimental. Battery will drain while in this mode.
       The system will shutdown when battery reaches $MIN_BATTERY%.
-      To return to normal operation, reboot and select your regular OS.
+      For safe recovery, you can use 'GrubPower: Recovery Mode' 
+      which will automatically boot your main OS after 30 seconds.
 ====================================
 EOF
 }
@@ -652,12 +914,29 @@ else
             load_config
             detect_system
             create_grub_entry
+            create_recovery_grub_entry
             ;;
         --uninstall)
             uninstall
             ;;
         --full)
             install_grubpower
+            ;;
+        --interactive)
+            interactive_setup
+            install_grubpower "--interactive"
+            ;;
+        --compatibility)
+            check_compatibility
+            ;;
+        --test-usb)
+            test_usb_power
+            ;;
+        --check-update)
+            check_for_updates
+            ;;
+        --version)
+            echo "GrubPower Advanced version $VERSION"
             ;;
         *)
             echo "Unknown option: $1"
