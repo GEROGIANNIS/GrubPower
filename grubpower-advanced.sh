@@ -882,12 +882,12 @@ control_display() {
                 if [ -f "$bl/brightness" ]; then
                     # Save current brightness
                     if [ -f "$bl/actual_brightness" ]; then
-                        cat "$bl/actual_brightness" > "$bl/saved_brightness"
+                        cat "$bl/actual_brightness" > "$bl/saved_brightness" 2>/dev/null || true
                     else
-                        cat "$bl/brightness" > "$bl/saved_brightness"
+                        cat "$bl/brightness" > "$bl/saved_brightness" 2>/dev/null || true
                     fi
                     # Turn off backlight
-                    echo 0 > "$bl/brightness"
+                    echo 0 > "$bl/brightness" 2>/dev/null || true
                 fi
             done
         fi
@@ -903,11 +903,11 @@ control_display() {
             for bl in /sys/class/backlight/*; do
                 if [ -f "$bl/brightness" ] && [ -f "$bl/saved_brightness" ]; then
                     # Restore saved brightness
-                    cat "$bl/saved_brightness" > "$bl/brightness"
+                    cat "$bl/saved_brightness" > "$bl/brightness" 2>/dev/null || true
                 elif [ -f "$bl/brightness" ] && [ -f "$bl/max_brightness" ]; then
                     # If no saved value, set to max/2
-                    max=$(cat "$bl/max_brightness")
-                    echo $((max / 2)) > "$bl/brightness"
+                    max=$(cat "$bl/max_brightness" 2>/dev/null || echo "100")
+                    echo $((max / 2)) > "$bl/brightness" 2>/dev/null || true
                 fi
             done
         fi
@@ -1557,9 +1557,9 @@ install_grubpower_debug() {
         if [ "$GRUB_PROBE_BOOT" != "Error" ]; then
             echo "GRUB probe reports /boot as: $GRUB_PROBE_BOOT"
             
-            # Extract actual GRUB root format
-            if [[ "$GRUB_PROBE_BOOT" =~ \(([^)]+)\) ]]; then
-                DETECTED_GRUB="${BASH_REMATCH[1]}"
+            # Extract actual GRUB root format using safer sed pattern matching
+            DETECTED_GRUB=$(echo "$GRUB_PROBE_BOOT" | sed -n 's/.*(\([^)]*\)).*/\1/p')
+            if [ -n "$DETECTED_GRUB" ]; then
                 echo "Setting GRUB_ROOT to: $DETECTED_GRUB"
                 GRUB_ROOT="$DETECTED_GRUB"
                 sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
@@ -1567,11 +1567,6 @@ install_grubpower_debug() {
                 echo "ERROR: Could not parse GRUB root from grub-probe output."
                 echo "Please manually set GRUB_ROOT in $CONFIG_FILE."
                 exit 1
-            fi
-                DETECTED_GRUB="${BASH_REMATCH[1]}"
-                echo "Setting GRUB_ROOT to: $DETECTED_GRUB"
-                GRUB_ROOT="$DETECTED_GRUB"
-                sed -i "s|GRUB_ROOT=.*|GRUB_ROOT=\"$GRUB_ROOT\"|" "$CONFIG_FILE"
             fi
         fi
     fi

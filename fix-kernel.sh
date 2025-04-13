@@ -24,8 +24,7 @@ echo "Current settings:"
 echo "- Kernel path: $KERNEL_PATH"
 echo "- GRUB root: $GRUB_ROOT"
 
-    
-    # Fix for genenic typo
+# Fix for genenic typo
 if [[ "$KERNEL_PATH" == *"genenic"* ]]; then
     FIXED_PATH="${KERNEL_PATH//genenic/generic}"
     echo "Fixed typo in kernel path:"
